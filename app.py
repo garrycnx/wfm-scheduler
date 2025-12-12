@@ -118,7 +118,7 @@ def min_to_time(m):
 # UI
 # ---------------------------
 st.title("AI Schedules Generator by Data Quest")
-st.title("Developed by Gurpreet Singh")
+st.markdown("<p style='font-size:12px; color:Blue;'>Tool developed by <b>Gurpreet Singh</b></p>", unsafe_allow_html=True)
 with st.sidebar:
     st.header("Settings")
     uploaded = st.file_uploader("Upload forecast CSV (one week, DD-MM-YYYY)", type=["csv"])
