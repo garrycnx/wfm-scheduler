@@ -1,9 +1,7 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import math
-from io import BytesIO
-from datetime import datetime, timedelta, time
-import base64
-import matplotlib.pyplot as plt
-import matplotlib
+streamlit>=1.30
+pandas
+numpy
+openpyxl
+matplotlib
+xlsxwriter
+
