@@ -122,7 +122,8 @@ st.markdown("<p style='font-size:12px; color:Blue;'>Tool developed by <b>Gurpree
 with st.sidebar:
     st.header("Settings")
     uploaded = st.file_uploader("Upload forecast CSV (one week, DD-MM-YYYY)", type=["csv"])
-    aht = st.slider("AHT (minutes)", 1, 60, 6)
+    aht_seconds = st.slider("AHT (seconds)", 1, 1000, 360)
+    aht = aht_seconds / 60.0
     sla_pct = st.slider("SLA target (%)", 50, 99, 80)
     sla_seconds = st.slider("SLA threshold (seconds)", 5, 300, 20)
     abandon_pct_target = st.slider("Abandon target (%)", 0, 50, 5)
