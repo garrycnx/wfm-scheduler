@@ -6,6 +6,8 @@ import math
 from io import BytesIO
 from datetime import datetime, timedelta, time
 import base64
+import matplotlib
+matplotlib.use("Agg")   # Use non-GUI backend for servers / Streamlit
 import matplotlib.pyplot as plt
 
 st.set_page_config(layout="wide", page_title="AI Schedule Generator by - Data Quest")
