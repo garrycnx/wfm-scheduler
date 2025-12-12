@@ -1,0 +1,408 @@
+# app.py
+import streamlit as st
+import pandas as pd
+import numpy as np
+import math
+from io import BytesIO
+from datetime import datetime, timedelta, time
+import base64
+import matplotlib.pyplot as plt
+
+st.set_page_config(layout="wide", page_title="Roster Generator (Mon-Sun)")
+
+# -------------- Erlang-C helpers --------------
+def erlang_c_Pw(a, c):
+    if c <= a:
+        return 1.0
+    sum_terms = sum((a**k) / math.factorial(k) for k in range(c))
+    a_c = a**c / math.factorial(c)
+    return (a_c * (c / (c - a))) / (sum_terms + a_c * (c / (c - a)))
+
+def erlang_c_P_wait_greater_t(a, c, mu, t):
+    pw = erlang_c_Pw(a, c)
+    exponent = - (c - a) * mu * t
+    if exponent < -700:
+        return 0.0
+    return pw * math.exp(exponent)
+
+def required_servers_for_SLA(arrivals_per_interval, aht_minutes, sla_fraction, sla_seconds):
+    # arrivals_per_interval = calls in 30-min interval (float)
+    if arrivals_per_interval <= 0:
+        return 0
+    interval_minutes = 30.0
+    lam = arrivals_per_interval / interval_minutes  # per-minute arrival rate
+    mu = 1.0 / aht_minutes  # service rate per minute
+    a = lam / mu  # offered load (erlangs)
+    t = sla_seconds / 60.0
+    start = max(1, math.ceil(a))
+    for c in range(start, max(start + 1, 400)):
+        if c <= a:
+            continue
+        p_wait_gt_t = erlang_c_P_wait_greater_t(a, c, mu, t)
+        if (1.0 - p_wait_gt_t) >= sla_fraction:
+            return c
+    return math.ceil(a) + 1
+
+# -------------- Helpers --------------
+WEEKDAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+
+def parse_weekday_from_date_str(s):
+    try:
+        dt = pd.to_datetime(s, dayfirst=True)
+        return dt.strftime("%a")[:3]  # Mon, Tue...
+    except:
+        return None
+
+def time_to_min(tstr):
+    if pd.isna(tstr): return None
+    s = str(tstr).strip()
+    if ' ' in s:
+        s = s.split()[-1]
+    for fmt in ("%H:%M", "%H.%M", "%H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt); return dt.hour*60 + dt.minute
+        except: pass
+    parts = s.split(':')
+    if len(parts) >= 2:
+        try: return int(parts[0])*60 + int(parts[1])
+        except: return None
+    return None
+
+def min_to_time(m):
+    h = (m // 60) % 24; mm = m % 60
+    return f"{h:02d}:{mm:02d}"
+
+# -------------- UI --------------
+st.title("Automatic Weekly Roster Generator (30-min intervals, Mon→Sun)")
+st.markdown("Upload CSV in this format: `date, Interval (start time), volume` for a full week (DD-MM-YYYY).")
+
+with st.sidebar:
+    st.header("Settings")
+    uploaded = st.file_uploader("Upload forecast CSV (long format, one week)", type=["csv"])
+    aht = st.slider("AHT (minutes)", 1, 60, 6)
+    sla_pct = st.slider("SLA target (%)", 50, 99, 80)
+    sla_seconds = st.slider("SLA threshold (seconds)", 5, 300, 20)
+    earliest = st.time_input("Earliest shift start", value=time(6,0))
+    latest = st.time_input("Latest shift start", value=time(18,0))
+    max_agents = st.number_input("Max agents cap (safety)", value=800, min_value=10, max_value=5000)
+    run_btn = st.button("Generate Roster")
+
+if uploaded is None:
+    st.info("Please upload your one-week forecast CSV (DD-MM-YYYY dates).")
+    st.stop()
+
+# -------------- Read & normalize --------------
+try:
+    df_raw = pd.read_csv(uploaded)
+except Exception as e:
+    st.error(f"Error reading CSV: {e}")
+    st.stop()
+
+# detect column names (flexible)
+cols = {c.lower(): c for c in df_raw.columns}
+col_map = {}
+for k in cols:
+    if 'date' == k or 'dt' == k or 'day' in k:
+        col_map['date'] = cols[k]
+    if 'interval' in k and ('start' in k or 'interval'==k or 'slot' in k):
+        col_map.setdefault('interval', cols[k])
+    if 'time' == k and 'interval' not in col_map:
+        col_map.setdefault('interval', cols[k])
+    if k in ('volume','vol','forecast','calls'):
+        col_map['volume'] = cols[k]
+
+required_keys = ['date','interval','volume']
+if not all(k in col_map for k in required_keys):
+    st.error("CSV must contain columns for date, interval (start) and volume. Detected: " + ", ".join(df_raw.columns))
+    st.stop()
+
+df = df_raw.rename(columns={col_map['date']:'date', col_map['interval']:'interval', col_map['volume']:'volume'})[["date","interval","volume"]].copy()
+
+# Parse weekday & times
+df['weekday'] = df['date'].apply(parse_weekday_from_date_str)
+df['slot_min'] = df['interval'].apply(time_to_min)
+if df['weekday'].isnull().any():
+    st.warning("Some date values couldn't be parsed as dates; those rows will be dropped.")
+    df = df[df['weekday'].notnull()]
+if df['slot_min'].isnull().any():
+    st.error("Some interval entries couldn't be parsed. Use 'HH:MM' or timestamp format.")
+    st.stop()
+
+# Aggregate by weekday+slot (sum volumes) — since file is single week this will just keep day-slot pairs
+df['slot_label'] = df['slot_min'].apply(min_to_time)
+df_agg = df.groupby(['weekday','slot_min','slot_label'], as_index=False)['volume'].sum()
+
+# Validate presence of Mon..Sun
+present_days = sorted(df_agg['weekday'].unique(), key=lambda x: WEEKDAYS.index(x) if x in WEEKDAYS else 999)
+st.write("Detected weekdays in file:", present_days)
+missing = [d for d in WEEKDAYS if d not in present_days]
+if missing:
+    st.warning(f"The file is missing these weekdays: {missing}. The app will continue but missing days will be treated as zero volume.")
+
+# Canonicalize full grid (Mon..Sun × all slots)
+all_slots = sorted(df_agg['slot_min'].unique())
+if not all_slots:
+    st.error("No valid time slots found.")
+    st.stop()
+
+rows = []
+for wd in WEEKDAYS:
+    for s in all_slots:
+        label = min_to_time(s)
+        v = df_agg.loc[(df_agg['weekday']==wd) & (df_agg['slot_min']==s),'volume']
+        vol = float(v.iloc[0]) if not v.empty else 0.0
+        rows.append({'weekday':wd,'slot_min':s,'slot_label':label,'volume':vol})
+df_week = pd.DataFrame(rows)
+
+# show forecast preview
+st.subheader("Forecast (calls / 30-min) — canonical Mon→Sun")
+pivot_fore = df_week.pivot(index='slot_label', columns='weekday', values='volume').reindex(columns=WEEKDAYS)
+st.dataframe(pivot_fore.head(48))
+
+# -------------- Required staff (Erlang-C) --------------
+st.subheader("Required staff (Erlang-C)")
+df_week['required'] = df_week['volume'].apply(lambda x: required_servers_for_SLA(x, aht, sla_pct/100.0, sla_seconds))
+pivot_req = df_week.pivot(index='slot_label', columns='weekday', values='required').reindex(columns=WEEKDAYS)
+st.dataframe(pivot_req.head(48))
+
+# visualize heatmaps
+fig, ax = plt.subplots(1,2,figsize=(14,4))
+ax[0].imshow(pivot_fore.fillna(0).T.values, aspect='auto')
+ax[0].set_title("Forecast heatmap (calls / 30-min)")
+ax[1].imshow(pivot_req.fillna(0).T.values, aspect='auto')
+ax[1].set_title("Required staff heatmap (agents)")
+st.pyplot(fig)
+
+# -------------- Shift templates --------------
+SHIFT_MIN = 9 * 60  # 9 hours
+min_start = earliest.hour*60 + earliest.minute
+max_start = latest.hour*60 + latest.minute
+starts = list(range(min_start, max_start+1, 30))
+shift_templates = [{'start':s,'end':s+SHIFT_MIN,'start_label':min_to_time(s),'end_label':min_to_time(s+SHIFT_MIN)} for s in starts]
+st.markdown(f"Shift start options (30-min grid): {len(shift_templates)}")
+
+# -------------- Scheduler (greedy) --------------
+if run_btn:
+    st.subheader("Generating roster (heuristic)... this may take a few seconds")
+    times = all_slots
+    # required dict
+    required = {wd: {min_to_time(t): int(df_week.loc[(df_week['weekday']==wd)&(df_week['slot_min']==t),'required'].iloc[0]) for t in times} for wd in WEEKDAYS}
+    def covers(start_min, slot_min):
+        return (start_min <= slot_min) and (slot_min < start_min + SHIFT_MIN)
+    def total_req(reqd):
+        return sum(sum(v for v in reqd[wd].values()) for wd in reqd)
+    agents = []
+    aid = 1
+    safety = 0
+    MAX_AGENTS = int(max_agents)
+    off_pairs = [('Sun','Mon'),('Mon','Tue'),('Tue','Wed'),('Wed','Thu'),('Thu','Fri'),('Fri','Sat'),('Sat','Sun')]
+    wd_idx = {d:i for i,d in enumerate(WEEKDAYS)}
+    def mask_for_offpair(off):
+        m = [1]*7
+        for d in off:
+            if d in wd_idx: m[wd_idx[d]] = 0
+        return m
+    while total_req(required) > 0 and len(agents) < MAX_AGENTS and safety < 8000:
+        safety += 1
+        # pick highest demand cell
+        bw=None; bt=None; bn=0
+        for wd in WEEKDAYS:
+            for tlabel,need in required[wd].items():
+                if need > bn:
+                    bn = need; bw = wd; bt = tlabel
+        if bn <= 0: break
+        slot_min = time_to_min(bt)
+        # choose best shift covering this
+        best_tpl=None; best_score=-1
+        for tpl in shift_templates:
+            if not covers(tpl['start'], slot_min): continue
+            covered = [t for t in times if covers(tpl['start'], t)]
+            score = sum(required[wd][min_to_time(t)] for wd in WEEKDAYS for t in covered)
+            if score > best_score:
+                best_score=score; best_tpl=tpl
+        if best_tpl is None:
+            smin = slot_min - SHIFT_MIN//2
+            best_tpl = {'start':smin,'end':smin+SHIFT_MIN,'start_label':min_to_time(smin)}
+        # choose off pair that maximizes coverage contribution
+        best_off=None; best_off_score=-1
+        for off in off_pairs:
+            m = mask_for_offpair(off)
+            covered = [t for t in times if covers(best_tpl['start'], t)]
+            sc=0
+            for i,wd in enumerate(WEEKDAYS):
+                if m[i]==0: continue
+                for t in covered: sc += required[wd][min_to_time(t)]
+            if sc > best_off_score:
+                best_off_score=sc; best_off=off
+        agent = {'id':f"A{aid}", 'start':int(best_tpl['start']), 'end':int(best_tpl['end']), 'off':best_off}
+        agents.append(agent); aid += 1
+        # reduce required by 1 for covered slots on working days
+        m = mask_for_offpair(best_off)
+        covered = [t for t in times if covers(agent['start'], t)]
+        for i,wd in enumerate(WEEKDAYS):
+            if m[i]==0: continue
+            for t in covered:
+                lbl = min_to_time(t)
+                required[wd][lbl] = max(0, required[wd][lbl]-1)
+    if len(agents) >= MAX_AGENTS: st.warning("Reached agents cap; roster may be incomplete.")
+    st.success(f"Created {len(agents)} agents.")
+
+    # roster df
+    roster = []
+    for ag in agents:
+        m = mask_for_offpair(ag['off'])
+        roster.append({
+            'Agent': ag['id'],
+            'Shift Start': min_to_time(ag['start']),
+            'Shift End': min_to_time(ag['end']),
+            'Off Days': f"{ag['off'][0]},{ag['off'][1]}",
+            'Mon': 'Work' if m[0]==1 else 'Off',
+            'Tue': 'Work' if m[1]==1 else 'Off',
+            'Wed': 'Work' if m[2]==1 else 'Off',
+            'Thu': 'Work' if m[3]==1 else 'Off',
+            'Fri': 'Work' if m[4]==1 else 'Off',
+            'Sat': 'Work' if m[5]==1 else 'Off',
+            'Sun': 'Work' if m[6]==1 else 'Off'
+        })
+    df_roster = pd.DataFrame(roster)
+    st.markdown("### Roster (first 200 agents)")
+    st.dataframe(df_roster.head(200))
+
+    # scheduled counts before breaks
+    def build_scheduled(agents_list):
+        sched = {wd:{min_to_time(t):0 for t in times} for wd in WEEKDAYS}
+        for ag in agents_list:
+            m = mask_for_offpair(ag['off'])
+            covered = [t for t in times if covers(ag['start'], t)]
+            for i,wd in enumerate(WEEKDAYS):
+                if m[i]==0: continue
+                for t in covered: sched[wd][min_to_time(t)] += 1
+        return sched
+
+    scheduled = build_scheduled(agents)
+
+    # break scheduling: create consistent break pattern per agent and apply across working days
+    breaks_rows = []
+    req_lookup = {wd:{min_to_time(r['slot_min']): int(r['required']) for _,r in df_week[df_week['weekday']==wd].iterrows()} for wd in WEEKDAYS}
+
+    def max_work_segment(s,e,brks):
+        b = sorted(brks, key=lambda x:x[0])
+        starts = [s] + [bk[1] for bk in b]
+        ends = [bk[0] for bk in b] + [e]
+        segs = [ends[i]-starts[i] for i in range(len(starts))]
+        return max(segs), segs
+
+    for ag in agents:
+        s = ag['start']; e = ag['end']
+        slot_candidates = [t for t in times if (t >= s and t+30 <= e)]
+        m = mask_for_offpair(ag['off'])
+        # compute slack sum across working days per slot
+        slot_slack = {}
+        for t in slot_candidates:
+            lbl=min_to_time(t)
+            slack_sum = 0
+            for i,wd in enumerate(WEEKDAYS):
+                if m[i]==0: continue
+                slack_sum += scheduled[wd].get(lbl,0) - req_lookup[wd].get(lbl,0)
+            slot_slack[lbl]=slack_sum
+        # choose lunch (60min) - pick pair of consecutive slots with max slack
+        lunch_candidates = [t for t in slot_candidates if t+30 in slot_candidates and t >= s+60 and t+60 <= e-60+60]
+        if not lunch_candidates: lunch_candidates = slot_candidates[:max(1,len(slot_candidates)//2)]
+        best_l = lunch_candidates[0]; best_score=-1e9
+        for t in lunch_candidates:
+            sc = slot_slack.get(min_to_time(t),0) + slot_slack.get(min_to_time(t+30),0)
+            if sc > best_score: best_score=sc; best_l=t
+        lunch_start = best_l; lunch_end = lunch_start + 60
+        # tea breaks: pick one before lunch, one after lunch maximizing slack
+        before = [t for t in slot_candidates if t+30 <= lunch_start]
+        after = [t for t in slot_candidates if t >= lunch_end]
+        if not before: before = slot_candidates[:3]
+        if not after: after = slot_candidates[-3:]
+        def best_slot(lst):
+            b = lst[0]
+            bs = -1e9
+            for t in lst:
+                sc = slot_slack.get(min_to_time(t),0)
+                if sc > bs: bs=sc; b=t
+            return b
+        tea1 = best_slot(before); tea2 = best_slot(after)
+        # ensure gaps <=180 if possible
+        brks = [(tea1, tea1+30),(lunch_start,lunch_end),(tea2,tea2+30)]
+        maxseg,_ = max_work_segment(s,e,brks)
+        if maxseg > 180:
+            # try move tea earlier/later
+            if brks[0][0]-30 >= s+30: brks[0]=(brks[0][0]-30, brks[0][1]-30)
+            if brks[2][1]+30 <= e: brks[2]=(brks[2][0]+30, brks[2][1]+30)
+        # assign breaks per working weekday - try to place where scheduled - required >=1; otherwise accept and decrement scheduled
+        per_day = {}
+        for i,wd in enumerate(WEEKDAYS):
+            if m[i]==0:
+                per_day[wd] = {'B1':None,'Lunch':None,'B2':None}
+                continue
+            chosen={}
+            for idx,(bstart,bend) in enumerate(brks):
+                lbl=min_to_time(bstart)
+                sc = scheduled[wd].get(lbl,0)
+                rq = req_lookup[wd].get(lbl,0)
+                if sc-1 >= rq:
+                    chosen_name = 'B1' if idx==0 else ('Lunch' if idx==1 else 'B2')
+                    chosen[chosen_name] = (bstart,bend)
+                    scheduled[wd][lbl] = sc-1
+                else:
+                    # try small shifts +/- 30/60 mins
+                    alt_found=False
+                    for dlt in [-60,-30,30,60]:
+                        cs = bstart + dlt
+                        if cs < s or cs+30 > e: continue
+                        cl = min_to_time(cs)
+                        sc2 = scheduled[wd].get(cl,0); rq2 = req_lookup[wd].get(cl,0)
+                        if sc2-1 >= rq2:
+                            chosen_name = 'B1' if idx==0 else ('Lunch' if idx==1 else 'B2')
+                            chosen[chosen_name] = (cs, cs + (60 if idx==1 else 30))
+                            scheduled[wd][cl] = sc2-1
+                            alt_found=True; break
+                    if not alt_found:
+                        chosen_name = 'B1' if idx==0 else ('Lunch' if idx==1 else 'B2')
+                        chosen[chosen_name] = (bstart,bend)
+                        scheduled[wd][lbl] = scheduled[wd].get(lbl,0) - 1
+            per_day[wd] = chosen
+        # add to break rows (one row per agent with daily break columns)
+        row = {'Agent':ag['id'],'Shift Start':min_to_time(s),'Shift End':min_to_time(e),'Off Days':f"{ag['off'][0]},{ag['off'][1]}"}
+        for wd in WEEKDAYS:
+            b1 = per_day[wd].get('B1'); ln = per_day[wd].get('Lunch'); b2 = per_day[wd].get('B2')
+            row[f"{wd}_Break_1"] = min_to_time(b1[0]) if b1 else ""
+            row[f"{wd}_Lunch"] = f"{min_to_time(ln[0])}-{min_to_time(ln[1])}" if ln else ""
+            row[f"{wd}_Break_2"] = min_to_time(b2[0]) if b2 else ""
+        breaks_rows.append(row)
+
+    df_breaks = pd.DataFrame(breaks_rows)
+    st.markdown("### Break schedule sample (first 200 agents)")
+    st.dataframe(df_breaks.head(200))
+
+    # -------------- Coverage check --------------
+    sched_df = pd.DataFrame({wd:[scheduled[wd].get(min_to_time(t),0) for t in times] for wd in WEEKDAYS}, index=[min_to_time(t) for t in times])
+    req_df = pd.DataFrame({wd:[int(df_week.loc[(df_week['weekday']==wd)&(df_week['slot_min']==t),'required'].iloc[0]) for t in times] for wd in WEEKDAYS}, index=[min_to_time(t) for t in times])
+    diff_df = sched_df - req_df
+    st.subheader("Coverage after breaks (scheduled - required)")
+    st.dataframe(diff_df.head(20))
+
+    # -------------- Export --------------
+    def to_excel(roster_df, breaks_df, required_df):
+        out = BytesIO()
+        with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
+            roster_df.to_excel(writer, sheet_name='Roster', index=False)
+            breaks_df.to_excel(writer, sheet_name='Breaks', index=False)
+            required_df.to_excel(writer, sheet_name='Required_Staff')
+            writer.save()
+        return out.getvalue()
+
+    excel = to_excel(df_roster, df_breaks, req_df.reset_index().rename(columns={'index':'time'}))
+    b64 = base64.b64encode(excel).decode()
+    st.markdown(f'<a href="data:application/octet-stream;base64,{b64}" download="roster_and_breaks.xlsx">Download Roster & Breaks (Excel)</a>', unsafe_allow_html=True)
+    st.download_button("Download roster CSV", data=df_roster.to_csv(index=False).encode(), file_name="roster.csv")
+    st.download_button("Download breaks CSV", data=df_breaks.to_csv(index=False).encode(), file_name="breaks.csv")
+    st.download_button("Download required staff CSV", data=req_df.to_csv(index=False).encode(), file_name="required_staff.csv")
+
+    st.markdown("**Notes:** This is a fast greedy heuristic to produce practical rosters. If you want optimal (minimum-headcount) scheduling, I can convert this to an MILP (ORTools/PuLP).")
+else:
+    st.info("Adjust sliders and click 'Generate Roster' to run.")
