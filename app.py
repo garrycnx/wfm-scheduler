@@ -475,20 +475,16 @@ if run:
             best_b2 = None
             
             # ---------------------------
-            # BREAK 2 (15 min)
+            # BREAK 2 (15 min) — OVERNIGHT SAFE
             # ---------------------------
 
-            # ✅ ALWAYS initialize first (prevents NameError / UnboundLocalError)
             b2_slots = []
             best_b2 = None
 
-            # Primary eligible slots
+            # Primary window
             b2_slots = [
                 t for t in tea_slots
-                if (
-                    t >= lunch_end + MIN_GAP
-                    and t <= shift_end - MIN_GAP
-                )
+                if lunch_end + MIN_GAP <= t <= shift_end - MIN_GAP
             ]
 
             def b2_score(t):
@@ -500,28 +496,32 @@ if run:
 
             # ---------- Primary attempt ----------
             if b2_slots:
-                best_b2 = max(b2_slots, key=b2_score, default=None)
+                best_b2 = max(b2_slots, key=b2_score)
 
             # ---------- Relaxed fallback (overnight-safe) ----------
             if not best_b2:
                 relaxed_b2 = [
                     t for t in tea_slots
-                    if (
-                        t >= lunch_end + 45
-                        and t <= shift_end - 45
-                    )
+                    if lunch_end + 45 <= t <= shift_end - 45
                 ]
                 if relaxed_b2:
-                    best_b2 = max(relaxed_b2, key=b2_score, default=None)
+                    best_b2 = max(relaxed_b2, key=b2_score)
 
-            # ---------- Forced assignment (WFM-grade guarantee) ----------
+            # ---------- Forced guarantee (last 60 mins of shift) ----------
             if not best_b2:
                 forced = shift_end - 60
                 if forced >= lunch_end + MIN_GAP:
                     best_b2 = forced
-                
-                
-                best_b2 = max(relaxed_b2, key=b2_score, default=None)
+
+            # ---------------------------
+            # ASSIGN BREAK-2 TO CORRECT DAY
+            # ---------------------------
+            if best_b2:
+                d2, _ = resolve_day_and_label(wd, best_b2)
+                row[f"{d2}_Break_2"] = (
+                    f"{min_to_time(best_b2 % 1440)}-"
+                    f"{min_to_time((best_b2 + 15) % 1440)}"
+                )
 
             # ---------------------------
             # FINAL ASSIGNMENT
