@@ -440,7 +440,7 @@ if run:
 
             def b1_score(t):
                 d, lbl = resolve_day_and_label(wd, t)
-                return tea_slack(t) - (break_load[d][lbl] ** 2) * BREAK_PENALTY
+                return tea_slack(t) - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
 
             best_b1 = max(b1_slots, key=b1_score, default=None)
             if not best_b1:
@@ -463,7 +463,7 @@ if run:
                 return (
                     slack.get(lbl, 0)
                     + slack.get(min_to_time((t + 30) % 1440), 0)
-                    - (break_load[d][lbl] ** 2) * BREAK_PENALTY
+                    - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
                 )
 
             best_lunch = max(lunch_slots, key=lunch_score, default=None)
@@ -486,7 +486,7 @@ if run:
 
             def b2_score(t):
                 d, lbl = resolve_day_and_label(wd, t)
-                return tea_slack(t) - (break_load[d][lbl] ** 2) * BREAK_PENALTY
+                return tea_slack(t) - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
 
             best_b2 = max(b2_slots, key=b2_score, default=None)
 
@@ -506,13 +506,15 @@ if run:
             d1, lbl1 = resolve_day_and_label(wd, best_b1)
             dl, lbll = resolve_day_and_label(wd, best_lunch)
 
-            break_load[d1][lbl1] += TEA_IMPACT
-            break_load[dl][lbll] += 1.0
-            break_load[dl][min_to_time((best_lunch + 30) % 1440)] += 1.0
+            break_load[d1][lbl1] = break_load[d1].get(lbl1, 0) + TEA_IMPACT
+            break_load[dl][lbll] = break_load[dl].get(lbll, 0) + 1.0
+            lunch_lbl_2 = min_to_time((best_lunch + 30) % 1440)
+            break_load[dl][lunch_lbl_2] = break_load[dl].get(lunch_lbl_2, 0) + 1.0
+
 
             if best_b2:
                 d2, lbl2 = resolve_day_and_label(wd, best_b2)
-                break_load[d2][lbl2] += TEA_IMPACT
+                break_load[d2][lbl2] = break_load[d2].get(lbl2, 0) + TEA_IMPACT
 
         break_rows.append(row)
 
