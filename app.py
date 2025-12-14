@@ -343,6 +343,11 @@ if run:
     TEA_IMPACT = 0.5
     BREAK_PENALTY = 3
 
+    # WFM GAP RULES
+    MIN_GAP = 60                     # min gap between any two breaks
+    MAX_LUNCH_FROM_START = 300       # lunch must be within 5 hrs
+    MAX_B2_FROM_LUNCH = 180          
+
     req_lookup = baseline_req
 
     # Track congestion per 30-min slot
@@ -352,7 +357,6 @@ if run:
     }
 
     def tea_break_slots(slots):
-        """Generate 15-min tea break start times from 30-min slots"""
         tea = []
         for t in slots:
             tea.append(t)
@@ -398,9 +402,6 @@ if run:
             ]
 
             if not slots:
-                row[f"{wd}_Break_1"] = ""
-                row[f"{wd}_Lunch"] = ""
-                row[f"{wd}_Break_2"] = ""
                 continue
 
             tea_slots = tea_break_slots(slots)
@@ -428,17 +429,17 @@ if run:
 
             best_b1 = max(b1_slots, key=b1_score, default=None)
             if not best_b1:
-                row[f"{wd}_Break_1"] = ""
-                row[f"{wd}_Lunch"] = ""
-                row[f"{wd}_Break_2"] = ""
                 continue
 
             # -------- LUNCH (60 mins) ----------
             lunch_slots = [
                 t for t in slots
-                if t >= best_b1 + 120
-                and t + 30 in slots
-                and t <= shift_end - 150
+                if (
+                    t >= best_b1 + MIN_GAP
+                    and t <= s + MAX_LUNCH_FROM_START
+                    and t + 30 in slots
+                    and t <= shift_end - 120
+                )
             ]
 
             def lunch_score(t):
@@ -451,20 +452,18 @@ if run:
 
             best_lunch = max(lunch_slots, key=lunch_score, default=None)
             if not best_lunch:
-                row[f"{wd}_Break_1"] = (
-                    f"{min_to_time(best_b1 % 1440)}-"
-                    f"{min_to_time((best_b1 + 15) % 1440)}"
-                )
-                row[f"{wd}_Lunch"] = ""
-                row[f"{wd}_Break_2"] = ""
                 continue
 
             lunch_end = best_lunch + 60
 
-            # -------- BREAK 2 (fallback enabled) ----------
+            # -------- BREAK 2 ----------
             b2_slots = [
                 t for t in tea_slots
-                if t >= lunch_end + 120 and t <= shift_end - 60
+                if (
+                    t >= lunch_end + MIN_GAP
+                    and t <= lunch_end + MAX_B2_FROM_LUNCH
+                    and t <= shift_end - 60
+                )
             ]
 
             def b2_score(t):
@@ -473,13 +472,13 @@ if run:
 
             best_b2 = max(b2_slots, key=b2_score, default=None)
 
-            # Fallback: relax gap if needed
+            # HARD FALLBACK — ensure Break-2
             if not best_b2:
-                relaxed = [
+                forced = [
                     t for t in tea_slots
-                    if t >= lunch_end + 90 and t <= shift_end - 45
+                    if shift_end - 90 <= t <= shift_end - 60
                 ]
-                best_b2 = max(relaxed, key=b2_score, default=None)
+                best_b2 = max(forced, key=b2_score, default=None)
 
             # -------- ASSIGN ----------
             row[f"{wd}_Break_1"] = (
@@ -507,7 +506,6 @@ if run:
 
     df_breaks = pd.DataFrame(break_rows)
     st.dataframe(df_breaks.head(200))
-
     # ---------------------------
     # Recompute coverage after breaks
     # ---------------------------
