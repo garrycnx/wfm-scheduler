@@ -549,8 +549,13 @@ if run:
 
 
             if best_b2:
-                d2, lbl2 = resolve_day_and_label(wd, best_b2)
-                break_load[d2][lbl2] = break_load[d2].get(lbl2, 0) + TEA_IMPACT
+                d2, _ = resolve_day_and_label(wd, best_b2)
+                row[f"{d2}_Break_2"] = (
+                    f"{min_to_time(best_b2 % 1440)}-"
+                    f"{min_to_time((best_b2 + 15) % 1440)}"
+                )    
+                    
+
 
         break_rows.append(row)
 
