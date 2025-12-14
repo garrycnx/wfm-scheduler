@@ -454,7 +454,7 @@ if run:
                 if (
                     t >= best_b1 + MIN_GAP
                     and t + 30 in slots
-                    and t <= shift_end - MIN_GAP
+                    and t <= shift_end - (MIN_GAP + TEA_BREAK_MIN)
                 )
             ]
 
@@ -473,6 +473,10 @@ if run:
 
             lunch_end = best_lunch + LUNCH_MIN
             best_b2 = None
+            
+            if b2_slots:
+                best_b2 = max(b2_slots, key=b2_score, default=None)
+            
             # ---------------------------
             # BREAK 2 (15 min)
             # ---------------------------
@@ -489,10 +493,11 @@ if run:
                 return tea_slack(t) - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
 
             if not best_b2:
-                relaxed_b2 = [
-                     t for t in tea_slots
-                     if t >= lunch_end + 45 and t <= shift_end - 45
-                ]
+                forced = shift_end - 60
+                if forced >= lunch_end + MIN_GAP:
+                    best_b2 = forced
+                
+                
                 best_b2 = max(relaxed_b2, key=b2_score, default=None)
 
             # ---------------------------
@@ -500,10 +505,13 @@ if run:
             # ---------------------------
             row[f"{wd}_Break_1"] = f"{min_to_time(best_b1 % 1440)}-{min_to_time((best_b1 + 15) % 1440)}"
             row[f"{wd}_Lunch"] = f"{min_to_time(best_lunch % 1440)}-{min_to_time((best_lunch + 60) % 1440)}"
-            row[f"{wd}_Break_2"] = (
-                f"{min_to_time(best_b2 % 1440)}-{min_to_time((best_b2 + 15) % 1440)}"
-                if best_b2 else ""
-            )
+            if best_b2:
+                d2, _ = resolve_day_and_label(wd, best_b2)
+                row[f"{d2}_Break_2"] = (
+                    f"{min_to_time(best_b2 % 1440)}-"
+                    f"{min_to_time((best_b2 + 15) % 1440)}"
+                )      
+
 
             # ---------------------------
             # UPDATE CONGESTION
