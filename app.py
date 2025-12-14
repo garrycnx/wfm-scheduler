@@ -335,133 +335,102 @@ if run:
     scheduled_counts = build_schedule_counts(agents)
 
     # ---------------------------
-    # Break scheduling PER DAY (each working day independent)
+    # Break  scheduling PER DAY (each working day independent)
     # ---------------------------
-# ---------------------------
-# Break scheduling PER DAY (each working day independent)
-# ---------------------------
-st.subheader("Assigning breaks per day (rule-based & slack-optimized)")
+    st.subheader("Assigning breaks per day (rule-based & slack-optimized)")
 
-req_lookup = baseline_req
-break_rows = []
+    req_lookup = baseline_req
+    break_rows = []
 
-for ag in agents:
-    s = ag["start"]
-    e = ag["end"]
+    for ag in agents:
+        s = ag["start"]
+        e = ag["end"]
 
-    row = {
-        "Agent": ag["id"],
-        "Shift Start": min_to_time(s),
-        "Shift End": min_to_time(e),
-        "Off Days": f"{ag['off'][0]},{ag['off'][1]}"
-    }
-
-    m = off_mask(ag["off"])
-
-    for i, wd in enumerate(WEEKDAYS):
-
-        if m[i] == 0:
-            row[f"{wd}_Break_1"] = ""
-            row[f"{wd}_Lunch"] = ""
-            row[f"{wd}_Break_2"] = ""
-            continue
-
-        # Valid 30-min slots inside shift
-        slot_candidates = [t for t in all_slots if s <= t and t + 30 <= e]
-
-        if not slot_candidates:
-            row[f"{wd}_Break_1"] = ""
-            row[f"{wd}_Lunch"] = ""
-            row[f"{wd}_Break_2"] = ""
-            continue
-
-        # Slack calculation
-        slot_slack = {
-            min_to_time(t): scheduled_counts[wd].get(min_to_time(t), 0)
-            - req_lookup[wd].get(min_to_time(t), 0)
-            for t in slot_candidates
+        row = {
+            "Agent": ag["id"],
+            "Shift Start": min_to_time(s),
+            "Shift End": min_to_time(e),
+            "Off Days": f"{ag['off'][0]},{ag['off'][1]}"
         }
 
-        # --------------------------------------------------
-        # BREAK-1 RULES
-        # - Not before 60 mins
-        # - Within first 180 mins
-        # --------------------------------------------------
-        b1_slots = [
-            t for t in slot_candidates
-            if s + 60 <= t <= s + 180
-        ]
+        m = off_mask(ag["off"])
 
-        best_b1 = max(
-            b1_slots,
-            key=lambda t: slot_slack[min_to_time(t)],
-            default=None
-        )
+        for i, wd in enumerate(WEEKDAYS):
 
-        if best_b1 is None:
-            row[f"{wd}_Break_1"] = ""
-            row[f"{wd}_Lunch"] = ""
-            row[f"{wd}_Break_2"] = ""
-            continue
+            if m[i] == 0:
+                row[f"{wd}_Break_1"] = ""
+                row[f"{wd}_Lunch"] = ""
+                row[f"{wd}_Break_2"] = ""
+                continue
 
-        # --------------------------------------------------
-        # LUNCH RULES
-        # - ≥120 mins after Break-1
-        # - Must allow Break-2 later
-        # --------------------------------------------------
-        lunch_slots = [
-            t for t in slot_candidates
-            if t >= best_b1 + 120
-            and t + 30 in slot_candidates
-            and t <= e - 180
-        ]
+            slot_candidates = [t for t in all_slots if s <= t and t + 30 <= e]
+            if not slot_candidates:
+                row[f"{wd}_Break_1"] = ""
+                row[f"{wd}_Lunch"] = ""
+                row[f"{wd}_Break_2"] = ""
+                continue
 
-        best_lunch = max(
-            lunch_slots,
-            key=lambda t: (
-                slot_slack[min_to_time(t)]
-                + slot_slack[min_to_time(t + 30)]
-            ),
-            default=None
-        )
+            slot_slack = {
+                min_to_time(t): scheduled_counts[wd].get(min_to_time(t), 0)
+                - req_lookup[wd].get(min_to_time(t), 0)
+                for t in slot_candidates
+            }
 
-        if best_lunch is None:
+            # Break 1: 60–180 mins
+            b1_slots = [t for t in slot_candidates if s + 60 <= t <= s + 180]
+            best_b1 = max(b1_slots, key=lambda t: slot_slack[min_to_time(t)], default=None)
+
+            if best_b1 is None:
+                continue
+
+            # Lunch: ≥120 mins after B1
+            lunch_slots = [
+                t for t in slot_candidates
+                if t >= best_b1 + 120 and t + 30 in slot_candidates and t <= e - 180
+            ]
+
+            best_lunch = max(
+                lunch_slots,
+                key=lambda t: slot_slack[min_to_time(t)] + slot_slack[min_to_time(t + 30)],
+                default=None
+            )
+
+            if best_lunch is None:
+                row[f"{wd}_Break_1"] = min_to_time(best_b1)
+                continue
+
+            lunch_end = best_lunch + 60
+
+            # Break 2: ≥120 mins after lunch, not last 60 mins
+            b2_slots = [t for t in slot_candidates if t >= lunch_end + 120 and t <= e - 60]
+            best_b2 = max(b2_slots, key=lambda t: slot_slack[min_to_time(t)], default=None)
+
             row[f"{wd}_Break_1"] = min_to_time(best_b1)
-            row[f"{wd}_Lunch"] = ""
-            row[f"{wd}_Break_2"] = ""
-            continue
+            row[f"{wd}_Lunch"] = f"{min_to_time(best_lunch)}-{min_to_time(lunch_end)}"
+            row[f"{wd}_Break_2"] = min_to_time(best_b2) if best_b2 else ""
 
-        lunch_end = best_lunch + 60
+        break_rows.append(row)
 
-        # --------------------------------------------------
-        # BREAK-2 RULES
-        # - ≥120 mins after lunch
-        # - ≥90 mins gap from lunch
-        # - NOT in last 60 mins
-        # --------------------------------------------------
-        b2_slots = [
-            t for t in slot_candidates
-            if t >= lunch_end + 120
-            and t <= e - 60
-        ]
+    df_breaks = pd.DataFrame(break_rows)
+    st.dataframe(df_breaks.head(200))
 
-        best_b2 = max(
-            b2_slots,
-            key=lambda t: slot_slack[min_to_time(t)],
-            default=None
-        )
+    # ---------------------------
+    # Recompute coverage after breaks
+    # ---------------------------
+    sched_df = pd.DataFrame(
+        {wd: [scheduled_counts[wd].get(min_to_time(t), 0) for t in all_slots] for wd in WEEKDAYS},
+        index=[min_to_time(t) for t in all_slots]
+    )
 
-        # --------------------------------------------------
-        # FINAL ASSIGNMENT
-        # --------------------------------------------------
-        row[f"{wd}_Break_1"] = min_to_time(best_b1)
-        row[f"{wd}_Lunch"] = f"{min_to_time(best_lunch)}-{min_to_time(lunch_end)}"
-        row[f"{wd}_Break_2"] = min_to_time(best_b2) if best_b2 else ""
+    req_df = pd.DataFrame(
+        {wd: [int(df_week.loc[(df_week["weekday"] == wd) & (df_week["slot_min"] == t), "required"].iloc[0])
+              for t in all_slots] for wd in WEEKDAYS},
+        index=[min_to_time(t) for t in all_slots]
+    )
 
-    break_rows.append(row)
-
-df_breaks = pd.DataFrame(break_rows)
-st.dataframe(df_breaks.head(200))
+    diff_df = sched_df - req_df
+    st.subheader("Coverage after breaks (scheduled - required)")
+    st.dataframe(diff_df.head(20))
 
     # ---------------------------
     # Recompute coverage after breaks (scheduled_counts mutated above)
