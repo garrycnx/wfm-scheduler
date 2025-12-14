@@ -487,26 +487,6 @@ if run:
 
 
 
-
-            # ---------- Primary attempt ----------
-            if b2_slots:
-                best_b2 = max(b2_slots, key=b2_score)
-
-            # ---------- Relaxed fallback (overnight-safe) ----------
-            if not best_b2:
-                relaxed_b2 = [
-                    t for t in tea_slots
-                    if lunch_end + 45 <= t <= shift_end - 45
-                ]
-                if relaxed_b2:
-                    best_b2 = max(relaxed_b2, key=b2_score)
-
-            # ---------- Forced guarantee (last 60 mins of shift) ----------
-            if not best_b2:
-                forced = shift_end - 60
-                if forced >= lunch_end + MIN_GAP:
-                    best_b2 = forced
-
             # ---------------------------
             # ASSIGN BREAK-2 TO CORRECT DAY
             # ---------------------------
