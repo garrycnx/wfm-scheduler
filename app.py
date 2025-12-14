@@ -421,9 +421,9 @@ if run:
             slack = {}
             for t in slots:
                 d, lbl = resolve_day_and_label(wd, t)
-                slack[lbl] = (
-                    scheduled_counts[d].get(lbl, 0)
-                    - req_lookup[d].get(lbl, 0)
+                slack[lbl] = min(
+                    slack.get(lbl, float("inf")),
+                    scheduled_counts[d].get(lbl, 0) - req_lookup[d].get(lbl, 0)
                 )
 
             def tea_slack(t):
@@ -454,7 +454,7 @@ if run:
                 if (
                     t >= best_b1 + MIN_GAP
                     and t + 30 in slots
-                    and t <= shift_end - (MIN_GAP + TEA_BREAK_MIN)
+                    and t <= shift_end - MIN_GAP
                 )
             ]
 
@@ -488,7 +488,12 @@ if run:
                 d, lbl = resolve_day_and_label(wd, t)
                 return tea_slack(t) - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
 
-            best_b2 = max(b2_slots, key=b2_score, default=None)
+            if not best_b2:
+                relaxed_b2 = [
+                     t for t in tea_slots
+                     if t >= lunch_end + 45 and t <= shift_end - 45
+                ]
+                best_b2 = max(relaxed_b2, key=b2_score, default=None)
 
             # ---------------------------
             # FINAL ASSIGNMENT
