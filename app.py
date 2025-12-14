@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -272,7 +271,14 @@ if run:
                     sc += required[wd][min_to_time(t)]
             if sc > best_off_score:
                 best_off_score=sc; best_off=op
-        agents.append({"id":f"A{aid}", "start":int(best_tpl["start"]), "end":int(best_tpl["end"]), "off":best_off})
+        # add start_day so breaks can resolve overnight correctly
+        agents.append({
+            "id": f"A{aid}",
+            "start": int(best_tpl["start"]),
+            "end": int(best_tpl["end"]),
+            "off": best_off,
+            "start_day": best_wd
+        })
         aid += 1
         # decrement
         m = off_mask(best_off)
@@ -331,7 +337,8 @@ if run:
     st.dataframe(df_roster.head(200))
 
     # ---------------------------
-    # Build  sscheduled counts (before breaks)
+    # Build scheduled counts (before breaks)
+    # ---------------------------
     scheduled_counts = build_schedule_counts(agents)
 
     # ---------------------------
@@ -381,6 +388,7 @@ if run:
     # ---------------------------
     for ag in agents:
         s, e = ag["start"], ag["end"]
+        base_day = ag.get("start_day", WEEKDAYS[0])
 
         shift_end = e if e > s else e + 1440
         extended_slots = all_slots if e > s else all_slots + [t + 1440 for t in all_slots]
@@ -402,6 +410,7 @@ if run:
                 row[f"{wd}_Break_2"] = ""
                 continue
 
+            # candidate work slots for this agent's shift window
             slots = [
                 t for t in extended_slots
                 if s <= t and t + 30 <= shift_end
@@ -420,14 +429,14 @@ if run:
             # ---------------------------
             slack = {}
             for t in slots:
-                d, lbl = resolve_day_and_label(wd, t)
+                d, lbl = resolve_day_and_label(base_day, t)
                 slack[lbl] = min(
                     slack.get(lbl, float("inf")),
                     scheduled_counts[d].get(lbl, 0) - req_lookup[d].get(lbl, 0)
                 )
 
             def tea_slack(t):
-                d, lbl = resolve_day_and_label(wd, t)
+                d, lbl = resolve_day_and_label(base_day, t)
                 return slack.get(lbl, 0) - TEA_IMPACT
 
             # ---------------------------
@@ -439,11 +448,14 @@ if run:
             ]
 
             def b1_score(t):
-                d, lbl = resolve_day_and_label(wd, t)
+                d, lbl = resolve_day_and_label(base_day, t)
                 return tea_slack(t) - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
 
             best_b1 = max(b1_slots, key=b1_score, default=None)
             if not best_b1:
+                row[f"{wd}_Break_1"] = ""
+                row[f"{wd}_Lunch"] = ""
+                row[f"{wd}_Break_2"] = ""
                 continue
 
             # ---------------------------
@@ -459,26 +471,26 @@ if run:
             ]
 
             def lunch_score(t):
-                d, lbl = resolve_day_and_label(wd, t)
+                d, lbl = resolve_day_and_label(base_day, t)
+                lbl2 = min_to_time((t + 30) % 1440)
                 return (
                     slack.get(lbl, 0)
-                    + slack.get(min_to_time((t + 30) % 1440), 0)
+                    + slack.get(lbl2, 0)
                     - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
                 )
 
             best_lunch = max(lunch_slots, key=lunch_score, default=None)
             if not best_lunch:
                 row[f"{wd}_Break_1"] = f"{min_to_time(best_b1 % 1440)}-{min_to_time((best_b1 + 15) % 1440)}"
+                row[f"{wd}_Lunch"] = ""
+                row[f"{wd}_Break_2"] = ""
                 continue
 
             lunch_end = best_lunch + LUNCH_MIN
-            best_b2 = None
-            
+
             # ---------------------------
             # BREAK 2 (15 min) — OVERNIGHT SAFE
             # ---------------------------
-
-            b2_slots = []
             best_b2 = None
 
             # Primary window
@@ -488,17 +500,17 @@ if run:
             ]
 
             def b2_score(t):
-                d, lbl = resolve_day_and_label(wd, t)
+                d, lbl = resolve_day_and_label(base_day, t)
                 return (
                     tea_slack(t)
                     - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
                 )
 
-            # ---------- Primary attempt ----------
+            # Primary attempt
             if b2_slots:
                 best_b2 = max(b2_slots, key=b2_score)
 
-            # ---------- Relaxed fallback (overnight-safe) ----------
+            # Relaxed fallback
             if not best_b2:
                 relaxed_b2 = [
                     t for t in tea_slots
@@ -507,21 +519,11 @@ if run:
                 if relaxed_b2:
                     best_b2 = max(relaxed_b2, key=b2_score)
 
-            # ---------- Forced guarantee (last 60 mins of shift) ----------
+            # Forced guarantee (last 60 mins)
             if not best_b2:
                 forced = shift_end - 60
                 if forced >= lunch_end + MIN_GAP:
                     best_b2 = forced
-
-            # ---------------------------
-            # ASSIGN BREAK-2 TO CORRECT DAY
-            # ---------------------------
-            if best_b2:
-                d2, _ = resolve_day_and_label(wd, best_b2)
-                row[f"{d2}_Break_2"] = (
-                    f"{min_to_time(best_b2 % 1440)}-"
-                    f"{min_to_time((best_b2 + 15) % 1440)}"
-                )
 
             # ---------------------------
             # FINAL ASSIGNMENT
@@ -529,33 +531,22 @@ if run:
             row[f"{wd}_Break_1"] = f"{min_to_time(best_b1 % 1440)}-{min_to_time((best_b1 + 15) % 1440)}"
             row[f"{wd}_Lunch"] = f"{min_to_time(best_lunch % 1440)}-{min_to_time((best_lunch + 60) % 1440)}"
             if best_b2:
-                d2, _ = resolve_day_and_label(wd, best_b2)
+                d2, _ = resolve_day_and_label(base_day, best_b2)
                 row[f"{d2}_Break_2"] = (
                     f"{min_to_time(best_b2 % 1440)}-"
                     f"{min_to_time((best_b2 + 15) % 1440)}"
-                )      
-
+                )
 
             # ---------------------------
             # UPDATE CONGESTION
             # ---------------------------
-            d1, lbl1 = resolve_day_and_label(wd, best_b1)
-            dl, lbll = resolve_day_and_label(wd, best_lunch)
+            d1, lbl1 = resolve_day_and_label(base_day, best_b1)
+            dl, lbll = resolve_day_and_label(base_day, best_lunch)
 
             break_load[d1][lbl1] = break_load[d1].get(lbl1, 0) + TEA_IMPACT
             break_load[dl][lbll] = break_load[dl].get(lbll, 0) + 1.0
             lunch_lbl_2 = min_to_time((best_lunch + 30) % 1440)
             break_load[dl][lunch_lbl_2] = break_load[dl].get(lunch_lbl_2, 0) + 1.0
-
-
-            if best_b2:
-                d2, _ = resolve_day_and_label(wd, best_b2)
-                row[f"{d2}_Break_2"] = (
-                    f"{min_to_time(best_b2 % 1440)}-"
-                    f"{min_to_time((best_b2 + 15) % 1440)}"
-                )    
-                    
-
 
         break_rows.append(row)
 
@@ -564,6 +555,7 @@ if run:
 
     # ---------------------------
     # Recompute coverage after breaks (scheduled_counts mutated above)
+    # ---------------------------
     sched_df = pd.DataFrame({wd: [scheduled_counts[wd].get(min_to_time(t),0) for t in all_slots] for wd in WEEKDAYS}, index=[min_to_time(t) for t in all_slots])
     req_df = pd.DataFrame({wd: [int(df_week.loc[(df_week["weekday"]==wd)&(df_week["slot_min"]==t),"required"].iloc[0]) for t in all_slots] for wd in WEEKDAYS}, index=[min_to_time(t) for t in all_slots])
     diff_df = sched_df - req_df
@@ -571,7 +563,7 @@ if run:
     st.dataframe(diff_df.head(20))
 
     # ---------------------------
-    # Daily projections (SLA / Abandon / Occupancy) - daily average abandon target used for reporting
+    # Daily projections (SLA / Abandon / Occupancy)
     # ---------------------------
     st.subheader("Daily projections (Erlang-A approx)")
 
@@ -620,9 +612,7 @@ if run:
             proj.to_excel(writer, sheet_name="Projections", index=False)
             fore.to_excel(writer, sheet_name="Forecast")
             req.to_excel(writer, sheet_name="Required")
-            # no writer.save() needed
         return out.getvalue()
-
 
     excel_data = export_all(df_roster, df_breaks, df_proj, pivot_fore, pivot_req)
     b64 = base64.b64encode(excel_data).decode()
