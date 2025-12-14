@@ -472,7 +472,7 @@ if run:
                 continue
 
             lunch_end = best_lunch + LUNCH_MIN
-
+            best_b2 = None
             # ---------------------------
             # BREAK 2 (15 min)
             # ---------------------------
