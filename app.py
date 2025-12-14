@@ -335,41 +335,55 @@ if run:
     scheduled_counts = build_schedule_counts(agents)
 
     # ---------------------------
-    # WFM-GRADE Break scheduling PER DAY (15-min tea breaks)
+    # WFM-GRADE Break scheduling PER DAY (overnight-safe, 15-min tea)
     # ---------------------------
     st.subheader("Assigning breaks per day (WFM-grade optimizer)")
 
     TEA_BREAK_MIN = 15
-    TEA_IMPACT = 0.5
+    LUNCH_MIN = 60
+    MIN_GAP = 60
     BREAK_PENALTY = 3
-
-    # WFM GAP RULES
-    MIN_GAP = 60                     # min gap between any two breaks
-    MAX_LUNCH_FROM_START = 300       # lunch must be within 5 hrs
-    MAX_B2_FROM_LUNCH = 180          
+    TEA_IMPACT = 0.5
 
     req_lookup = baseline_req
 
-    # Track congestion per 30-min slot
-    break_load = {
-        wd: {min_to_time(t): 0.0 for t in all_slots}
-        for wd in WEEKDAYS
-    }
+    # ---------------------------
+    # Helpers for overnight handling
+    # ---------------------------
+    def resolve_day_and_label(wd, t):
+        day_idx = WEEKDAYS.index(wd)
+        if t >= 1440:
+            day_idx = (day_idx + 1) % 7
+        return WEEKDAYS[day_idx], min_to_time(t % 1440)
 
-    def tea_break_slots(slots):
+    def slot_label_30(t):
+        return min_to_time((t // 30) * 30)
+
+    def generate_tea_slots(slots):
         tea = []
         for t in slots:
             tea.append(t)
             tea.append(t + 15)
         return tea
 
-    def slot_label_30(t):
-        return min_to_time((t // 30) * 30)
+    # ---------------------------
+    # Track break congestion
+    # ---------------------------
+    break_load = {
+        wd: {min_to_time(t): 0.0 for t in all_slots}
+        for wd in WEEKDAYS
+    }
 
     break_rows = []
 
+    # ---------------------------
+    # Main break loop
+    # ---------------------------
     for ag in agents:
         s, e = ag["start"], ag["end"]
+
+        shift_end = e if e > s else e + 1440
+        extended_slots = all_slots if e > s else all_slots + [t + 1440 for t in all_slots]
 
         row = {
             "Agent": ag["id"],
@@ -388,141 +402,122 @@ if run:
                 row[f"{wd}_Break_2"] = ""
                 continue
 
-            # Handle overnight shifts
-            shift_end = e if e > s else e + 1440
-            extended_slots = (
-                all_slots
-                if e > s
-                else all_slots + [t + 1440 for t in all_slots]
-            )
-
             slots = [
                 t for t in extended_slots
                 if s <= t and t + 30 <= shift_end
             ]
 
             if not slots:
+                row[f"{wd}_Break_1"] = ""
+                row[f"{wd}_Lunch"] = ""
+                row[f"{wd}_Break_2"] = ""
                 continue
 
-            tea_slots = tea_break_slots(slots)
+            tea_slots = generate_tea_slots(slots)
 
-            slack = {
-                min_to_time(t % 1440):
-                    scheduled_counts[wd].get(min_to_time(t % 1440), 0)
-                    - req_lookup[wd].get(min_to_time(t % 1440), 0)
-                for t in slots
-            }
+            # ---------------------------
+            # Slack calculation (overnight-safe)
+            # ---------------------------
+            slack = {}
+            for t in slots:
+                d, lbl = resolve_day_and_label(wd, t)
+                slack[lbl] = (
+                    scheduled_counts[d].get(lbl, 0)
+                    - req_lookup[d].get(lbl, 0)
+                )
 
             def tea_slack(t):
-                lbl = slot_label_30(t % 1440)
+                d, lbl = resolve_day_and_label(wd, t)
                 return slack.get(lbl, 0) - TEA_IMPACT
 
-            # -------- BREAK 1 (60–180 mins) ----------
+            # ---------------------------
+            # BREAK 1 (15 min)
+            # ---------------------------
             b1_slots = [
                 t for t in tea_slots
-                if s + 60 <= t <= s + 180
+                if s + MIN_GAP <= t <= s + 180
             ]
 
             def b1_score(t):
-                lbl = slot_label_30(t % 1440)
-                return tea_slack(t) - (break_load[wd][lbl] ** 2) * BREAK_PENALTY
+                d, lbl = resolve_day_and_label(wd, t)
+                return tea_slack(t) - (break_load[d][lbl] ** 2) * BREAK_PENALTY
 
             best_b1 = max(b1_slots, key=b1_score, default=None)
             if not best_b1:
                 continue
 
-            # -------- LUNCH (60 mins) ----------
+            # ---------------------------
+            # LUNCH (60 min)
+            # ---------------------------
             lunch_slots = [
                 t for t in slots
                 if (
                     t >= best_b1 + MIN_GAP
-                    and t <= s + MAX_LUNCH_FROM_START
                     and t + 30 in slots
-                    and t <= shift_end - 120
+                    and t <= shift_end - (MIN_GAP + TEA_BREAK_MIN)
                 )
             ]
 
             def lunch_score(t):
-                lbl = slot_label_30(t % 1440)
+                d, lbl = resolve_day_and_label(wd, t)
                 return (
                     slack.get(lbl, 0)
                     + slack.get(min_to_time((t + 30) % 1440), 0)
-                    - (break_load[wd][lbl] ** 2) * BREAK_PENALTY
+                    - (break_load[d][lbl] ** 2) * BREAK_PENALTY
                 )
 
             best_lunch = max(lunch_slots, key=lunch_score, default=None)
             if not best_lunch:
+                row[f"{wd}_Break_1"] = f"{min_to_time(best_b1 % 1440)}-{min_to_time((best_b1 + 15) % 1440)}"
                 continue
 
-            lunch_end = best_lunch + 60
+            lunch_end = best_lunch + LUNCH_MIN
 
-            # -------- BREAK 2 ----------
+            # ---------------------------
+            # BREAK 2 (15 min)
+            # ---------------------------
             b2_slots = [
                 t for t in tea_slots
                 if (
                     t >= lunch_end + MIN_GAP
-                    and t <= lunch_end + MAX_B2_FROM_LUNCH
-                    and t <= shift_end - 60
+                    and t <= shift_end - MIN_GAP
                 )
             ]
 
             def b2_score(t):
-                lbl = slot_label_30(t % 1440)
-                return tea_slack(t) - (break_load[wd][lbl] ** 2) * BREAK_PENALTY
+                d, lbl = resolve_day_and_label(wd, t)
+                return tea_slack(t) - (break_load[d][lbl] ** 2) * BREAK_PENALTY
 
             best_b2 = max(b2_slots, key=b2_score, default=None)
 
-            # HARD FALLBACK — ensure Break-2
-            if not best_b2:
-                forced = [
-                    t for t in tea_slots
-                    if shift_end - 90 <= t <= shift_end - 60
-                ]
-                best_b2 = max(forced, key=b2_score, default=None)
-
-            # -------- ASSIGN ----------
-            row[f"{wd}_Break_1"] = (
-                f"{min_to_time(best_b1 % 1440)}-"
-                f"{min_to_time((best_b1 + 15) % 1440)}"
-            )
-            row[f"{wd}_Lunch"] = (
-                f"{min_to_time(best_lunch % 1440)}-"
-                f"{min_to_time((best_lunch + 60) % 1440)}"
-            )
+            # ---------------------------
+            # FINAL ASSIGNMENT
+            # ---------------------------
+            row[f"{wd}_Break_1"] = f"{min_to_time(best_b1 % 1440)}-{min_to_time((best_b1 + 15) % 1440)}"
+            row[f"{wd}_Lunch"] = f"{min_to_time(best_lunch % 1440)}-{min_to_time((best_lunch + 60) % 1440)}"
             row[f"{wd}_Break_2"] = (
-                f"{min_to_time(best_b2 % 1440)}-"
-                f"{min_to_time((best_b2 + 15) % 1440)}"
+                f"{min_to_time(best_b2 % 1440)}-{min_to_time((best_b2 + 15) % 1440)}"
                 if best_b2 else ""
             )
 
-            # -------- UPDATE LOAD ----------
-            break_load[wd][slot_label_30(best_b1 % 1440)] += TEA_IMPACT
-            break_load[wd][slot_label_30(best_lunch % 1440)] += 1.0
-            break_load[wd][slot_label_30((best_lunch + 30) % 1440)] += 1.0
+            # ---------------------------
+            # UPDATE CONGESTION
+            # ---------------------------
+            d1, lbl1 = resolve_day_and_label(wd, best_b1)
+            dl, lbll = resolve_day_and_label(wd, best_lunch)
+
+            break_load[d1][lbl1] += TEA_IMPACT
+            break_load[dl][lbll] += 1.0
+            break_load[dl][min_to_time((best_lunch + 30) % 1440)] += 1.0
+
             if best_b2:
-                break_load[wd][slot_label_30(best_b2 % 1440)] += TEA_IMPACT
+                d2, lbl2 = resolve_day_and_label(wd, best_b2)
+                break_load[d2][lbl2] += TEA_IMPACT
 
         break_rows.append(row)
 
     df_breaks = pd.DataFrame(break_rows)
     st.dataframe(df_breaks.head(200))
-    # ---------------------------
-    # Recompute coverage after breaks
-    # ---------------------------
-    sched_df = pd.DataFrame(
-        {wd: [scheduled_counts[wd].get(min_to_time(t), 0) for t in all_slots] for wd in WEEKDAYS},
-        index=[min_to_time(t) for t in all_slots]
-    )
-
-    req_df = pd.DataFrame(
-        {wd: [int(df_week.loc[(df_week["weekday"] == wd) & (df_week["slot_min"] == t), "required"].iloc[0])
-              for t in all_slots] for wd in WEEKDAYS},
-        index=[min_to_time(t) for t in all_slots]
-    )
-
-    diff_df = sched_df - req_df
-    st.subheader("Coverage after breaks (scheduled - required)")
-    st.dataframe(diff_df.head(20))
 
     # ---------------------------
     # Recompute coverage after breaks (scheduled_counts mutated above)
