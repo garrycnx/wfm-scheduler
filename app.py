@@ -335,16 +335,26 @@ if run:
     scheduled_counts = build_schedule_counts(agents)
 
     # ---------------------------
-    # Break  scheduling PER DAY (each working day independent)
+    # Break  scheduling PER DAY (good each working day independent)
     # ---------------------------
-    st.subheader("Assigning breaks per day (rule-based & slack-optimized)")
+    # ---------------------------
+    # WFM-GRADE Break scheduling PER DAY
+    # ---------------------------
+    st.subheader("Assigning breaks per day (WFM-grade optimizer)")
 
+    BREAK_PENALTY = 3  # higher = more spreading
     req_lookup = baseline_req
+
+    # track break congestion
+    break_load = {
+        wd: {min_to_time(t): 0 for t in all_slots}
+        for wd in WEEKDAYS
+    }
+
     break_rows = []
 
     for ag in agents:
-        s = ag["start"]
-        e = ag["end"]
+        s, e = ag["start"], ag["end"]
 
         row = {
             "Agent": ag["id"],
@@ -363,51 +373,79 @@ if run:
                 row[f"{wd}_Break_2"] = ""
                 continue
 
-            slot_candidates = [t for t in all_slots if s <= t and t + 30 <= e]
-            if not slot_candidates:
+            slots = [t for t in all_slots if s <= t and t + 30 <= e]
+
+            if not slots:
                 row[f"{wd}_Break_1"] = ""
                 row[f"{wd}_Lunch"] = ""
                 row[f"{wd}_Break_2"] = ""
                 continue
 
-            slot_slack = {
-                min_to_time(t): scheduled_counts[wd].get(min_to_time(t), 0)
-                - req_lookup[wd].get(min_to_time(t), 0)
-                for t in slot_candidates
+            slack = {
+                min_to_time(t):
+                    scheduled_counts[wd].get(min_to_time(t), 0)
+                    - req_lookup[wd].get(min_to_time(t), 0)
+                for t in slots
             }
 
-            # Break 1: 60–180 mins
-            b1_slots = [t for t in slot_candidates if s + 60 <= t <= s + 180]
-            best_b1 = max(b1_slots, key=lambda t: slot_slack[min_to_time(t)], default=None)
+            # -------- BREAK-1 (60–180 mins) ----------
+            b1_slots = [t for t in slots if s + 60 <= t <= s + 180]
 
-            if best_b1 is None:
+            def b1_score(t):
+                lbl = min_to_time(t)
+                return slack[lbl] - break_load[wd][lbl] * BREAK_PENALTY
+
+            best_b1 = max(b1_slots, key=b1_score, default=None)
+            if not best_b1:
                 continue
 
-            # Lunch: ≥120 mins after B1
+            # -------- LUNCH (pull earlier if needed) ----------
             lunch_slots = [
-                t for t in slot_candidates
-                if t >= best_b1 + 120 and t + 30 in slot_candidates and t <= e - 180
+                t for t in slots
+                if t >= best_b1 + 120
+                and t + 30 in slots
+                and t <= e - 150  # leave space for Break-2
             ]
 
-            best_lunch = max(
-                lunch_slots,
-                key=lambda t: slot_slack[min_to_time(t)] + slot_slack[min_to_time(t + 30)],
-                default=None
-            )
+            def lunch_score(t):
+                lbl = min_to_time(t)
+                return (
+                    slack[lbl]
+                    + slack[min_to_time(t + 30)]
+                    - break_load[wd][lbl] * BREAK_PENALTY
+                )
 
-            if best_lunch is None:
+            best_lunch = max(lunch_slots, key=lunch_score, default=None)
+            if not best_lunch:
                 row[f"{wd}_Break_1"] = min_to_time(best_b1)
+                row[f"{wd}_Lunch"] = ""
+                row[f"{wd}_Break_2"] = ""
                 continue
 
             lunch_end = best_lunch + 60
 
-            # Break 2: ≥120 mins after lunch, not last 60 mins
-            b2_slots = [t for t in slot_candidates if t >= lunch_end + 120 and t <= e - 60]
-            best_b2 = max(b2_slots, key=lambda t: slot_slack[min_to_time(t)], default=None)
+            # -------- BREAK-2 ----------
+            b2_slots = [
+                t for t in slots
+                if t >= lunch_end + 120 and t <= e - 60
+            ]
 
+            def b2_score(t):
+                lbl = min_to_time(t)
+                return slack[lbl] - break_load[wd][lbl] * BREAK_PENALTY
+
+            best_b2 = max(b2_slots, key=b2_score, default=None)
+
+            # -------- ASSIGN + UPDATE LOAD ----------
             row[f"{wd}_Break_1"] = min_to_time(best_b1)
             row[f"{wd}_Lunch"] = f"{min_to_time(best_lunch)}-{min_to_time(lunch_end)}"
             row[f"{wd}_Break_2"] = min_to_time(best_b2) if best_b2 else ""
+
+            break_load[wd][min_to_time(best_b1)] += 1
+            break_load[wd][min_to_time(best_lunch)] += 1
+            break_load[wd][min_to_time(best_lunch + 30)] += 1
+            if best_b2:
+                break_load[wd][min_to_time(best_b2)] += 1
 
         break_rows.append(row)
 
