@@ -6,6 +6,8 @@ import math
 from io import BytesIO
 from datetime import datetime, timedelta, time
 import base64
+import random
+
 
 # Matplotlib fix for Streamlit Cloud
 import matplotlib
@@ -431,68 +433,60 @@ if run:
                 return slack.get(lbl, 0) - TEA_IMPACT
 
             # ---------------------------
-            # BREAK 1 (15 min)
+            # BREAK 1 (15 min) — GUARANTEED
             # ---------------------------
-            b1_slots = [
+            b1_candidates = [
                 t for t in tea_slots
-                if s + MIN_GAP <= t <= s + 180
+                if s + MIN_GAP <= t <= min(s + 180, shift_end - 120)
             ]
 
-            def b1_score(t):
-                d, lbl = resolve_day_and_label(wd, t)
-                return tea_slack(t) - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
+            if not b1_candidates:
+                b1_candidates = [
+                    t for t in tea_slots
+                    if s + 30 <= t <= shift_end - 150
+                ]
 
-            best_b1 = max(b1_slots, key=b1_score, default=None)
-            if not best_b1:
-                continue
+            best_b1 = random.choice(b1_candidates)
 
             # ---------------------------
-            # LUNCH (60 min)
+            # LUNCH (60 min) — GUARANTEED
             # ---------------------------
-            lunch_slots = [
+            lunch_candidates = [
                 t for t in slots
                 if (
                     t >= best_b1 + MIN_GAP
                     and t + 30 in slots
-                    and t <= shift_end - (MIN_GAP + TEA_BREAK_MIN)
+                    and t <= shift_end - 90
                 )
             ]
 
-            def lunch_score(t):
-                d, lbl = resolve_day_and_label(wd, t)
-                return (
-                    slack.get(lbl, 0)
-                    + slack.get(min_to_time((t + 30) % 1440), 0)
-                    - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
-                )
+            if not lunch_candidates:
+                lunch_candidates = [
+                    t for t in slots
+                    if best_b1 + 45 <= t <= shift_end - 60
+                ]
 
-            best_lunch = max(lunch_slots, key=lunch_score, default=None)
-            if not best_lunch:
-                row[f"{wd}_Break_1"] = f"{min_to_time(best_b1 % 1440)}-{min_to_time((best_b1 + 15) % 1440)}"
-                continue
-
+            best_lunch = random.choice(lunch_candidates)
             lunch_end = best_lunch + LUNCH_MIN
-            best_b2 = None
-            
-            # ---------------------------
-            # BREAK 2 (15 min) — OVERNIGHT SAFE
-            # ---------------------------
 
-            b2_slots = []
-            best_b2 = None
-
-            # Primary window
-            b2_slots = [
+            # ---------------------------
+            # BREAK 2 (15 min) — GUARANTEED
+            # ---------------------------
+            b2_candidates = [
                 t for t in tea_slots
-                if lunch_end + MIN_GAP <= t <= shift_end - MIN_GAP
+                if lunch_end + MIN_GAP <= t <= shift_end - 15
             ]
 
-            def b2_score(t):
-                d, lbl = resolve_day_and_label(wd, t)
-                return (
-                    tea_slack(t)
-                    - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
-                )
+            if not b2_candidates:
+                b2_candidates = [
+                    t for t in tea_slots
+                    if lunch_end + 30 <= t <= shift_end - 15
+                ]
+
+            best_b2 = random.choice(b2_candidates)
+
+
+
 
             # ---------- Primary attempt ----------
             if b2_slots:
