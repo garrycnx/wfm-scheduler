@@ -474,12 +474,15 @@ if run:
             lunch_end = best_lunch + LUNCH_MIN
             best_b2 = None
             
-            if b2_slots:
-                best_b2 = max(b2_slots, key=b2_score, default=None)
-            
             # ---------------------------
             # BREAK 2 (15 min)
             # ---------------------------
+
+            # ✅ ALWAYS initialize first (prevents NameError / UnboundLocalError)
+            b2_slots = []
+            best_b2 = None
+
+            # Primary eligible slots
             b2_slots = [
                 t for t in tea_slots
                 if (
@@ -490,8 +493,28 @@ if run:
 
             def b2_score(t):
                 d, lbl = resolve_day_and_label(wd, t)
-                return tea_slack(t) - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
+                return (
+                    tea_slack(t)
+                    - (break_load[d].get(lbl, 0) ** 2) * BREAK_PENALTY
+                )
 
+            # ---------- Primary attempt ----------
+            if b2_slots:
+                best_b2 = max(b2_slots, key=b2_score, default=None)
+
+            # ---------- Relaxed fallback (overnight-safe) ----------
+            if not best_b2:
+                relaxed_b2 = [
+                    t for t in tea_slots
+                    if (
+                        t >= lunch_end + 45
+                        and t <= shift_end - 45
+                    )
+                ]
+                if relaxed_b2:
+                    best_b2 = max(relaxed_b2, key=b2_score, default=None)
+
+            # ---------- Forced assignment (WFM-grade guarantee) ----------
             if not best_b2:
                 forced = shift_end - 60
                 if forced >= lunch_end + MIN_GAP:
