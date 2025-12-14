@@ -470,21 +470,32 @@ if run:
             lunch_end = best_lunch + LUNCH_MIN
 
             # ---------------------------
-            # BREAK 2 (15 min) — GUARANTEED
+            # BREAK 2 (15 min) — GUARANTEED (NO EMPTY LIST)
             # ---------------------------
             b2_candidates = [
                 t for t in tea_slots
                 if lunch_end + MIN_GAP <= t <= shift_end - 15
             ]
 
+            # Relaxed fallback
             if not b2_candidates:
                 b2_candidates = [
                     t for t in tea_slots
                     if lunch_end + 30 <= t <= shift_end - 15
                 ]
 
-            best_b2 = random.choice(b2_candidates)
+            # HARD fallback — absolutely guaranteed
+            if not b2_candidates:
+                b2_candidates = [
+                    t for t in tea_slots
+                    if s + 30 <= t <= shift_end - 15
+                ]
 
+            # FINAL safety (should never fail)
+            if not b2_candidates:
+                best_b2 = shift_end - 15
+            else:
+                best_b2 = random.choice(b2_candidates)
 
 
             # ---------------------------
