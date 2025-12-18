@@ -9,6 +9,23 @@ import base64
 import random
 
 
+st.markdown(
+    """
+    <style>
+    /* Hide Streamlit header */
+    header {visibility: hidden;}
+
+    /* Remove top padding */
+    .block-container {
+        padding-top: 1rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+
 # Matplotlib fix for Streamlit Cloud
 import matplotlib
 matplotlib.use("Agg")
